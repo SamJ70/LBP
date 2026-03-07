@@ -38,12 +38,19 @@ function ConfidenceBar({ score }) {
 }
 
 function PredictResults({ data }) {
+  // Radar chart: all values normalised 0–100
+  // Efficiency : 0W=100, 3000W=0   (linear, capped)
+  // Surface    : 0.1μm=100, 10μm=0 (lower Ra = better)
+  // Tool Life  : 0min=0, 120min=100 (uses tool_life_min if present, else wear-rate proxy)
+  // MRR        : 0=0, 50000mm³/min=100
+  // Confidence : 0–1 → 0–100
+  const toolLifeMin = data.tool_life_min ?? (data.tool_wear_rate > 0 ? 0.5 / data.tool_wear_rate : 60)
   const radarData = [
-    { metric: 'Efficiency', value: Math.min(100, (1 - data.energy_consumption / 2000) * 100) },
-    { metric: 'Surface',    value: Math.min(100, (1 - data.surface_roughness / 10) * 100) },
-    { metric: 'Tool Life',  value: Math.min(100, (1 - data.tool_wear_rate * 1000) * 100) },
-    { metric: 'MRR',        value: Math.min(100, data.mrr / 100) },
-    { metric: 'Confidence', value: data.confidence_score * 100 },
+    { metric: 'Efficiency', value: Math.min(100, Math.max(0, (1 - data.energy_consumption / 3000) * 100)) },
+    { metric: 'Surface',    value: Math.min(100, Math.max(0, (1 - data.surface_roughness / 10) * 100)) },
+    { metric: 'Tool Life',  value: Math.min(100, Math.max(0, (toolLifeMin / 120) * 100)) },
+    { metric: 'MRR',        value: Math.min(100, Math.max(0, data.mrr / 500)) },
+    { metric: 'Confidence', value: Math.min(100, data.confidence_score * 100) },
   ]
   const raColor = data.surface_roughness < 1.6 ? '' : data.surface_roughness < 3.2 ? 'warn' : 'danger'
 

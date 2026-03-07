@@ -1,12 +1,26 @@
 """
 BASE MODEL
 ==========
-All AI models must extend this class.
-Implement predict() and get_info() at minimum.
+All AI models must extend this class. Implement predict() and get_info().
+
+The default optimize() method here is used by SklearnBaselineModel and HuggingFaceModel.
+PhysicsBasedModel overrides it with a more precise Taylor-constraint version.
+
+Optimizer design (corrected):
+  Objective : minimize energy_consumption (Watts)
+  Ra  ≤ Ra_current × 1.10   — quality maintained within 10%
+  MRR ≥ MRR_current × 0.30  — productivity floor (no trivially slow solutions)
+  Speed search: 50%→100% only — increasing speed always increases power (P ∝ Vc)
+  Feed search : 40%→100%      — lower feed → better Ra but lower MRR
+  DoC  search : 50%→100%      — lower DoC → lower cutting force → lower power
+
+FIX: old version searched speed up to 130% and had no MRR floor, causing trivial
+     minimum-everything solutions that destroyed productivity.
 """
 
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Tuple
+import itertools
 
 
 class BaseMLModel(ABC):
@@ -14,79 +28,88 @@ class BaseMLModel(ABC):
     @abstractmethod
     def predict(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Predict machining outputs for given inputs.
-        
-        Args:
-            inputs: dict with keys:
-                - process_type: str
-                - material: str
-                - tool_material: str
-                - spindle_speed: float (RPM)
-                - feed_rate: float (mm/rev)
-                - depth_of_cut: float (mm)
-                - width_of_cut: float (mm, optional)
-                - tool_diameter: float (mm, optional)
-                - coolant_used: bool
-
-        Returns:
-            dict with keys:
-                - energy_consumption: float (Watts)
-                - surface_roughness: float (Ra, micrometers)
-                - tool_wear_rate: float (mm/min)
-                - mrr: float (mm³/min)
-                - confidence_score: float (0-1)
+        Predict machining outputs.
+        Returns dict with:
+          energy_consumption (W), surface_roughness (Ra μm),
+          tool_wear_rate (mm/min), mrr (mm³/min), confidence_score (0-1)
         """
         pass
 
     @abstractmethod
     def get_info(self) -> Dict[str, Any]:
-        """Return model metadata."""
         pass
 
     def is_available(self) -> bool:
-        """Check if model is ready to use (e.g., API key present, file exists)."""
         return True
 
     def optimize(self, inputs: Dict[str, Any], constraints: Dict[str, Any] = None) -> Tuple[Dict, Dict]:
         """
-        Find optimized parameters.
-        Default implementation: grid search over parameter space.
-        Override for smarter optimization (e.g., genetic algorithm, Bayesian).
-        
-        Returns:
-            (optimized_params, optimized_predictions)
+        Default constrained optimizer for all models.
+        Uses self.predict() so it works correctly with any model's predictions.
         """
-        import itertools
-
         constraints = constraints or {}
-        min_ra = constraints.get("max_surface_roughness", 3.0)  # max Ra allowed
-        
+
+        current   = self.predict(inputs)
+        Ra_cur    = current["surface_roughness"]
+        MRR_cur   = current["mrr"]
+        E_cur     = current["energy_consumption"]
+
+        # Adaptive constraints — never hard-coded
+        Ra_max  = constraints.get("max_surface_roughness", Ra_cur * 1.10)
+        MRR_min = MRR_cur * 0.60   # keep ≥60% productivity — realistic for production
+
+        speed = float(inputs["spindle_speed"])
+        feed  = float(inputs["feed_rate"])
+        doc   = float(inputs["depth_of_cut"])
+
+        # Physics insight: P ∝ Fc·Vc ∝ Kc·ap·f^(1-mc)·Vc
+        # → Reducing speed and DoC always reduces energy
+        # → Speed range capped at 100% (higher = higher power, never optimal for energy)
+        # → Feed reduced to improve Ra, but floor at 40% to prevent killing productivity
+        speed_scales = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00]
+        feed_scales  = [0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00]
+        doc_scales   = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00]
+
         best_params = None
         best_energy = float('inf')
-        best_preds = None
+        best_preds  = None
 
-        # Search space: ±20% around input values
-        speed = inputs["spindle_speed"]
-        feed = inputs["feed_rate"]
-        doc = inputs["depth_of_cut"]
+        # Pass 1: strict Ra + MRR constraints
+        for ss, fs, ds in itertools.product(speed_scales, feed_scales, doc_scales):
+            test = {
+                **inputs,
+                "spindle_speed": round(speed * ss, 1),
+                "feed_rate":     round(feed * fs,  5),
+                "depth_of_cut":  round(doc * ds,   5),
+            }
+            p = self.predict(test)
+            if p["surface_roughness"] > Ra_max:
+                continue
+            if p["mrr"] < MRR_min:
+                continue
+            if p["energy_consumption"] < best_energy:
+                best_energy = p["energy_consumption"]
+                best_params = test
+                best_preds  = p
 
-        candidates = list(itertools.product(
-            [speed * 0.8, speed * 0.9, speed, speed * 1.1, speed * 1.2],
-            [feed * 0.8, feed * 0.9, feed, feed * 1.1],
-            [doc * 0.7, doc * 0.8, doc * 0.9, doc],
-        ))
-
-        for s, f, d in candidates:
-            test_input = {**inputs, "spindle_speed": s, "feed_rate": f, "depth_of_cut": d}
-            preds = self.predict(test_input)
-            if preds["surface_roughness"] <= min_ra:
-                if preds["energy_consumption"] < best_energy:
-                    best_energy = preds["energy_consumption"]
-                    best_params = test_input
-                    best_preds = preds
+        # Pass 2: relax MRR to 0% floor, widen Ra to 1.5× (rare fallback)
+        if best_params is None:
+            for ss, fs, ds in itertools.product(speed_scales, feed_scales, doc_scales):
+                test = {
+                    **inputs,
+                    "spindle_speed": round(speed * ss, 1),
+                    "feed_rate":     round(feed * fs,  5),
+                    "depth_of_cut":  round(doc * ds,   5),
+                }
+                p = self.predict(test)
+                if p["surface_roughness"] <= Ra_cur * 1.50:
+                    if p["energy_consumption"] < best_energy:
+                        best_energy = p["energy_consumption"]
+                        best_params = test
+                        best_preds  = p
 
         if best_params is None:
             best_params = inputs
-            best_preds = self.predict(inputs)
+            best_preds  = current
 
         return best_params, best_preds

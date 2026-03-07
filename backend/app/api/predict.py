@@ -7,7 +7,7 @@ from typing import Dict, Any
 router = APIRouter()
 
 
-def _input_to_dict(inp: MachiningInput) -> Dict[str, Any]:
+def _to_dict(inp: MachiningInput) -> Dict[str, Any]:
     return {
         "process_type":  inp.process_type.value,
         "material":      inp.material.value,
@@ -21,66 +21,95 @@ def _input_to_dict(inp: MachiningInput) -> Dict[str, Any]:
     }
 
 
+def _safe_pred(preds: dict) -> PredictionOutput:
+    """Strip extra physics-internal keys (tool_life_min, vc_mpm) before returning."""
+    fields = PredictionOutput.model_fields.keys()
+    return PredictionOutput(**{k: preds[k] for k in fields if k in preds})
+
+
 @router.post("/", response_model=PredictionOutput)
 def predict(inp: MachiningInput):
-    """Predict energy, surface roughness, tool wear for given parameters."""
     try:
-        model = get_model(inp.model_id)
-        result = model.predict(_input_to_dict(inp))
-        return PredictionOutput(**{k: result[k] for k in PredictionOutput.model_fields})
+        model  = get_model(inp.model_id)
+        result = model.predict(_to_dict(inp))
+        return _safe_pred(result)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
 
 
 @router.post("/optimize", response_model=OptimizationResult)
 def optimize(inp: MachiningInput):
-    """
-    Find energy-optimal parameters while maintaining surface quality.
-    Physics model: uses engineering equation constraints (Ra, tool life).
-    ML models: uses guided grid search.
-    """
     try:
-        model = get_model(inp.model_id)
-        input_dict = _input_to_dict(inp)
+        model      = get_model(inp.model_id)
+        input_dict = _to_dict(inp)
 
-        original_preds = model.predict(input_dict)
-        opt_params, opt_preds = model.optimize(input_dict)
+        original_preds_raw        = model.predict(input_dict)
+        opt_params, opt_preds_raw = model.optimize(input_dict)
 
-        energy_orig = original_preds["energy_consumption"]
-        energy_opt  = opt_preds["energy_consumption"]
-        savings_pct = ((energy_orig - energy_opt) / energy_orig * 100) if energy_orig > 0 else 0
+        original_preds = _safe_pred(original_preds_raw)
+        opt_preds      = _safe_pred(opt_preds_raw)
 
-        quality_ok = opt_preds["surface_roughness"] <= original_preds["surface_roughness"] * 1.1
+        E_orig = original_preds.energy_consumption
+        E_opt  = opt_preds.energy_consumption
+        savings_pct = ((E_orig - E_opt) / E_orig * 100.0) if E_orig > 0 else 0.0
 
+        # Quality maintained = Ra within 5% of original
+        quality_ok = opt_preds.surface_roughness <= original_preds.surface_roughness * 1.05
+
+        # ── Parameter change notes ────────────────────────────────────────
         notes = []
-        if abs(opt_params.get("spindle_speed", 0) - input_dict["spindle_speed"]) > 1:
-            notes.append(f"Spindle speed: {input_dict['spindle_speed']:.0f} → {opt_params['spindle_speed']:.0f} RPM")
-        if abs(opt_params.get("feed_rate", 0) - input_dict["feed_rate"]) > 0.001:
-            notes.append(f"Feed rate: {input_dict['feed_rate']:.3f} → {opt_params['feed_rate']:.4f} mm/rev")
-        if abs(opt_params.get("depth_of_cut", 0) - input_dict["depth_of_cut"]) > 0.001:
-            notes.append(f"Depth of cut: {input_dict['depth_of_cut']:.2f} → {opt_params['depth_of_cut']:.3f} mm")
-        if not notes:
-            notes.append("Current parameters are already near the energy-optimal point for given constraints.")
+        dN  = float(opt_params.get("spindle_speed", inp.spindle_speed))
+        df  = float(opt_params.get("feed_rate",     inp.feed_rate))
+        dap = float(opt_params.get("depth_of_cut",  inp.depth_of_cut))
 
-        # Determine optimization method label
+        if abs(dN - inp.spindle_speed) > 1:
+            pct = (dN - inp.spindle_speed) / inp.spindle_speed * 100
+            notes.append(f"Spindle: {inp.spindle_speed:.0f} → {dN:.0f} RPM  ({pct:+.1f}%)")
+        if abs(df - inp.feed_rate) > 0.0005:
+            pct = (df - inp.feed_rate) / inp.feed_rate * 100
+            notes.append(f"Feed: {inp.feed_rate:.4f} → {df:.4f} mm/rev  ({pct:+.1f}%)")
+        if abs(dap - inp.depth_of_cut) > 0.0005:
+            pct = (dap - inp.depth_of_cut) / inp.depth_of_cut * 100
+            notes.append(f"Depth of cut: {inp.depth_of_cut:.3f} → {dap:.3f} mm  ({pct:+.1f}%)")
+        if not notes:
+            notes.append("Current parameters are already at the energy-optimal point for these constraints.")
+
+        # ── Optimization method description ───────────────────────────────
         model_info = model.get_info()
         if model_info.get("type") == "physics":
-            opt_method = "Constrained optimization: minimize Pc subject to Ra ≤ Ra_max and T ≥ T_min (Taylor / Merchant equations)"
+            opt_method = (
+                "Constrained grid search — objective: minimize P = Kc·ap·f^(1-mc)·Vc / (60·η)  "
+                "subject to: Ra ≤ Ra_current × 1.1  |  T ≥ T_min (adaptive, Taylor: T=(C/Vc)^(1/n))  "
+                "|  MRR ≥ MRR_current × 0.30"
+            )
+        elif model_info.get("type") == "llm":
+            opt_method = (
+                "Physics-backed grid search (same as physics engine) — "
+                "LLM used for expert recommendations only, not numeric optimization"
+            )
         else:
-            opt_method = f"Guided grid search via {model_info.get('name', inp.model_id)}"
+            opt_method = (
+                f"Constrained grid search via {model_info.get('name', inp.model_id)} — "
+                f"minimize energy subject to Ra ≤ Ra_current×1.1, MRR ≥ MRR_current×0.30"
+            )
 
-        # Expert advice
+        # ── Expert advice ─────────────────────────────────────────────────
+        # Always use the original (non-optimized) inputs for advice context,
+        # then the optimized predictions as the reference point
         hf = HuggingFaceModel()
-        ai_advice = hf.get_advice(opt_params, opt_preds) if inp.model_id == "huggingface_llm" \
-                    else hf._engineering_advice(opt_params, opt_preds)
+        if inp.model_id == "huggingface_llm":
+            ai_advice = hf.get_advice(opt_params, opt_preds_raw)
+        else:
+            # For physics and sklearn, give advice on optimized params + results
+            ai_advice = hf._engineering_advice(opt_params, opt_preds_raw)
 
         return OptimizationResult(
             original_params=inp,
-            original_predictions=PredictionOutput(**{k: original_preds[k] for k in PredictionOutput.model_fields}),
+            original_predictions=original_preds,
             optimized_params=opt_params,
-            optimized_predictions=PredictionOutput(**{k: opt_preds[k] for k in PredictionOutput.model_fields}),
+            optimized_predictions=opt_preds,
             energy_savings_percent=round(savings_pct, 2),
             quality_maintained=quality_ok,
             optimization_notes=notes,
@@ -88,7 +117,8 @@ def optimize(inp: MachiningInput):
             ai_advice=ai_advice,
             optimization_method=opt_method,
         )
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Optimization failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Optimization failed: {e}")

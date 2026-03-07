@@ -1,183 +1,338 @@
 """
 HUGGINGFACE API MODEL
-======================
-IMPORTANT: This model calls the HuggingFace Inference API.
-The AI model RUNS ON HUGGINGFACE'S CLOUD SERVERS — NOT on your laptop.
-Zero GPU, zero RAM, zero download. Just an HTTP request.
+=====================
+Numeric predictions : physics equations (PhysicsBasedModel) — always reliable
+Expert text advice  : Mistral-7B via HuggingFace Inference API (cloud, free tier)
+                      Falls back to rule-based engineering advice if no API key
 
 Setup (one-time, free):
-  1. Create account at huggingface.co (free)
-  2. Go to huggingface.co/settings/tokens → New token → Read
-  3. Copy token (starts with hf_...)
-  4. In backend/.env set: HUGGINGFACE_API_KEY=hf_your_token_here
-  5. Restart backend
+  1. huggingface.co → Settings → Access Tokens → New token (read)
+  2. backend/.env → HUGGINGFACE_API_KEY=hf_your_token_here
+  3. Restart backend
 
-When you train your own model on HuggingFace:
-  - Push your model to HuggingFace Hub: model.push_to_hub("your-username/machining-v1")
-  - Change HF_LLM_MODEL below to "your-username/machining-v1"
-  - No other code changes needed
-
-If API key is not set or request fails → falls back to rule-based advice automatically.
-Predictions (numbers) always use physics equations as backbone.
+To use your own fine-tuned model:
+  HF_LLM_MODEL = "your-username/your-model-id"  (change line below)
 """
 
 import os
-import json
+import math
 import requests
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 from app.ml_models.base_model import BaseMLModel
-from app.ml_models.physics_model import PhysicsBasedModel
+from app.ml_models.physics_model import PhysicsBasedModel, MATERIALS, TOOLS
 
-
-# ===================================================================
-# CHANGE THIS when you have a fine-tuned model on HuggingFace Hub:
-# ===================================================================
 HF_LLM_MODEL = "mistralai/Mistral-7B-Instruct-v0.3"
-# HF_LLM_MODEL = "your-username/machining-optimizer-v1"   # ← your model
+
+# Human-readable labels for LLM prompt (not internal enum strings)
+_MAT_LABEL = {
+    "aluminum":        "Aluminum",
+    "steel_mild":      "Mild Steel",
+    "steel_stainless": "Stainless Steel (304/316)",
+    "cast_iron":       "Cast Iron",
+    "titanium":        "Titanium",
+    "copper":          "Copper",
+}
+_TOOL_LABEL = {
+    "hss":     "HSS",
+    "carbide": "Carbide",
+    "ceramic": "Ceramic",
+    "cbn":     "CBN",
+    "diamond": "Diamond",
+}
+_PROC_LABEL = {
+    "turning":  "CNC Turning",
+    "milling":  "CNC Milling",
+    "drilling": "Drilling",
+    "grinding": "Grinding",
+}
 
 
 class HuggingFaceModel(BaseMLModel):
-    """
-    Numeric predictions: backed by physics equations (reliable).
-    Expert text advice: Mistral-7B via HuggingFace API (cloud, free tier).
-    """
 
     def __init__(self):
-        self._physics = PhysicsBasedModel()
-        self._api_key = os.getenv("HUGGINGFACE_API_KEY", "").strip()
+        self._physics  = PhysicsBasedModel()
+        self._api_key  = os.getenv("HUGGINGFACE_API_KEY", "").strip()
 
-    def _api_url(self) -> str:
-        return f"https://api-inference.huggingface.co/models/{HF_LLM_MODEL}"
+    # ─────────────────────────────────────────────────────────────────────
+    def predict(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
+        """Numeric predictions always from physics (reliable, deterministic)."""
+        preds = self._physics.predict(inputs)
+        preds["confidence_score"] = 0.76
+        return preds
 
+    def optimize(self, inputs: Dict[str, Any], constraints: Dict[str, Any] = None) -> Tuple[Dict, Dict]:
+        """
+        Use physics optimizer directly — HF model gives identical numeric results
+        since predict() is physics-backed. No point calling base_model grid search
+        separately; physics optimizer is more accurate (includes Taylor constraints).
+        """
+        return self._physics.optimize(inputs, constraints)
+
+    # ─────────────────────────────────────────────────────────────────────
     def _call_llm(self, prompt: str) -> str:
-        """
-        Call HuggingFace Inference API.
-        Request runs on HF servers — nothing downloads to your machine.
-        Free tier: ~1000 requests/day for Mistral-7B.
-        """
         if not self._api_key:
             return ""
         headers = {"Authorization": f"Bearer {self._api_key}"}
         payload = {
             "inputs": prompt,
             "parameters": {
-                "max_new_tokens": 250,
-                "temperature": 0.3,
+                "max_new_tokens": 300,
+                "temperature": 0.2,        # lower = less hallucination
+                "top_p": 0.90,
                 "return_full_text": False,
-                "stop": ["\n\n", "###"],
-            }
+                "stop": ["[/INST]", "\n\n---", "###", "Note:"],
+            },
         }
         try:
-            resp = requests.post(self._api_url(), headers=headers, json=payload, timeout=25)
+            resp = requests.post(
+                f"https://api-inference.huggingface.co/models/{HF_LLM_MODEL}",
+                headers=headers, json=payload, timeout=30
+            )
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list) and data:
-                    text = data[0].get("generated_text", "").strip()
-                    return text
+                    return data[0].get("generated_text", "").strip()
             elif resp.status_code == 503:
-                # Model loading — first call takes ~20s
-                return "[Model loading on HF servers, try again in 30s]"
+                return "[Model loading on HF servers — retry in 30 s]"
             elif resp.status_code == 401:
-                return "[Invalid HuggingFace API key — check your .env file]"
-            return ""
+                return "[Invalid HuggingFace API key — check backend/.env]"
         except requests.exceptions.Timeout:
-            return "[HuggingFace API timeout — try again]"
+            return "[HuggingFace API timeout — retry]"
         except Exception as e:
             return f"[HF API error: {e}]"
+        return ""
 
-    def predict(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        """Use physics model for all numeric predictions."""
-        preds = self._physics.predict(inputs)
-        preds["confidence_score"] = 0.76
-        return preds
+    def _validate_llm_response(self, text: str) -> bool:
+        """
+        Reject LLM output that is clearly hallucinated or irrelevant.
+        Checks: non-empty, contains at least one digit (real advice has numbers),
+                not an error message, not excessively short.
+        """
+        if not text or text.startswith("["):
+            return False
+        if len(text) < 40:
+            return False
+        has_number = any(c.isdigit() for c in text)
+        return has_number
 
     def get_advice(self, inputs: Dict[str, Any], predictions: Dict[str, Any]) -> str:
         """
-        Get expert advice from LLM if API key available,
-        otherwise fall back to rule-based engineering advice.
+        Generate expert recommendations.
+        Uses LLM if API key is present and response passes validation.
+        Falls back to deterministic rule-based advice otherwise.
         """
-        if not self._api_key:
-            return self._engineering_advice(inputs, predictions)
+        if self._api_key:
+            llm_text = self._call_llm(self._build_prompt(inputs, predictions))
+            if self._validate_llm_response(llm_text):
+                return llm_text
 
-        prompt = f"""[INST]You are a CNC machining expert. Analyze these parameters and give 3 specific actionable recommendations to reduce energy while maintaining quality.
-
-Process: {inputs['process_type']} | Material: {inputs['material']} | Tool: {inputs['tool_material']}
-Speed: {inputs['spindle_speed']} RPM | Feed: {inputs['feed_rate']} mm/rev | DoC: {inputs['depth_of_cut']} mm | Coolant: {inputs.get('coolant_used')}
-Results: Energy={predictions['energy_consumption']:.0f}W | Ra={predictions['surface_roughness']:.2f}μm | MRR={predictions['mrr']:.0f}mm³/min | Tool life est.={1/(predictions['tool_wear_rate']+1e-9):.0f}min
-
-Give 3 numbered recommendations, each one sentence. Be specific with numbers.[/INST]"""
-
-        response = self._call_llm(prompt)
-        if response and not response.startswith("["):
-            return response
         return self._engineering_advice(inputs, predictions)
+
+    def _build_prompt(self, inputs: Dict[str, Any], predictions: Dict[str, Any]) -> str:
+        """
+        Build a grounded, specific prompt for the LLM.
+        Uses human-readable labels, correct tool life value, and asks for
+        concrete numbered recommendations with real machining numbers.
+        """
+        proc  = _PROC_LABEL.get(inputs.get("process_type","turning"), inputs.get("process_type",""))
+        mat   = _MAT_LABEL.get(inputs.get("material","steel_mild"), inputs.get("material",""))
+        tool  = _TOOL_LABEL.get(inputs.get("tool_material","carbide"), inputs.get("tool_material",""))
+        N     = inputs.get("spindle_speed", 800)
+        f     = inputs.get("feed_rate", 0.15)
+        ap    = inputs.get("depth_of_cut", 1.5)
+        cool  = "yes" if inputs.get("coolant_used") else "no"
+        E     = predictions.get("energy_consumption", 0)
+        Ra    = predictions.get("surface_roughness", 0)
+        mrr   = predictions.get("mrr", 0)
+        T_min = predictions.get("tool_life_min", 0)   # use direct field, not 1/wear_rate
+
+        return (
+            f"[INST]You are a CNC machining process engineer. "
+            f"Analyze these cutting parameters and give exactly 3 specific, numbered "
+            f"recommendations to reduce energy consumption while maintaining part quality. "
+            f"Each recommendation must include specific numeric values.\n\n"
+            f"Process: {proc}\n"
+            f"Material: {mat}\n"
+            f"Tool: {tool}\n"
+            f"Spindle speed: {N} RPM\n"
+            f"Feed rate: {f} mm/rev\n"
+            f"Depth of cut: {ap} mm\n"
+            f"Coolant: {cool}\n"
+            f"Predicted energy: {E:.0f} W\n"
+            f"Predicted Ra: {Ra:.2f} μm\n"
+            f"Estimated MRR: {mrr:.0f} mm³/min\n"
+            f"Estimated tool life: {T_min:.0f} min\n\n"
+            f"Recommendations (3 numbered, specific, actionable):[/INST]"
+        )
 
     def _engineering_advice(self, inputs: Dict[str, Any], predictions: Dict[str, Any]) -> str:
         """
-        Rule-based engineering advice when LLM is unavailable.
-        Based on machining handbook guidelines.
+        Deterministic rule-based engineering advice.
+        All tips are physically correct and grounded in machining handbook data.
+
+        FIX: removed wrong tip 'reduce DoC + increase speed' (that increases power).
+        FIX: feed suggestion now uses correct Ra = 32*f²/r formula.
+        FIX: grinding advice uses correct units (table speed, not mm/rev).
+        FIX: all advice cross-checked against P = Kc·ap·f^(1-mc)·Vc / (60·η).
         """
         tips = []
-        Ra    = predictions["surface_roughness"]
-        power = predictions["energy_consumption"]
-        f     = inputs["feed_rate"]
-        N     = inputs["spindle_speed"]
-        mat   = inputs["material"]
-        tool  = inputs["tool_material"]
-        proc  = inputs["process_type"]
-        cool  = inputs.get("coolant_used", False)
+        Ra    = float(predictions.get("surface_roughness", 0))
+        power = float(predictions.get("energy_consumption", 0))
+        T_min = float(predictions.get("tool_life_min", 9999))
+        mrr   = float(predictions.get("mrr", 0))
+        f     = float(inputs.get("feed_rate", 0.15))
+        ap    = float(inputs.get("depth_of_cut", 1.5))
+        N     = float(inputs.get("spindle_speed", 800))
+        mat   = inputs.get("material", "steel_mild")
+        tool  = inputs.get("tool_material", "carbide")
+        proc  = inputs.get("process_type", "turning")
+        cool  = bool(inputs.get("coolant_used", False))
+        D     = float(inputs.get("tool_diameter") or 20.0)
 
-        # Surface quality guidance
-        if Ra > 3.2:
-            new_f = round(f * 0.75, 3)
-            tips.append(f"Ra={Ra:.2f}μm exceeds N7 grade. Reduce feed to ~{new_f} mm/rev to bring Ra below 3.2μm.")
-        elif Ra > 1.6:
-            new_f = round(f * 0.80, 3)
-            tips.append(f"Ra={Ra:.2f}μm is N8 grade. For N7 finish reduce feed to ~{new_f} mm/rev.")
+        # ── 1. Surface roughness guidance ─────────────────────────────────
+        # Ra = 32·f²/r  →  to hit Ra_target: f_new = f × sqrt(Ra_target/Ra_current)
+        r_nose = 0.4
+        if Ra > 3.2 and proc in ("turning", "milling", "drilling"):
+            f_new = round(f * math.sqrt(3.2 / Ra), 3)
+            tips.append(
+                f"Ra {Ra:.2f} μm exceeds N7 grade (3.2 μm). "
+                f"Reduce feed rate from {f:.3f} to {f_new:.3f} mm/rev "
+                f"to achieve Ra ≤ 3.2 μm (formula: f_new = f·√(Ra_target/Ra_current))."
+            )
+        elif Ra > 1.6 and proc in ("turning", "milling"):
+            f_new = round(f * math.sqrt(1.6 / Ra), 3)
+            tips.append(
+                f"Ra {Ra:.2f} μm is N8 grade. "
+                f"For N7 finish (Ra ≤ 1.6 μm) reduce feed to {f_new:.3f} mm/rev."
+            )
 
-        # Energy reduction
-        if power > 800:
-            tips.append(f"High power ({power:.0f}W): reduce depth of cut by 20% and compensate with +15% spindle speed to lower specific cutting energy.")
+        # ── 2. Energy reduction ───────────────────────────────────────────
+        # P = Kc·ap·f^(1-mc)·Vc / (60·η)  →  P ∝ ap × Vc
+        # Most effective lever: reduce spindle speed (direct Vc effect)
+        # Secondary: reduce ap (reduces Fc linearly)
+        # Wrong: "increase speed" never reduces energy
+        Kc1, mc, _, _, _ = MATERIALS.get(mat, MATERIALS["steel_mild"])
+        if power > 1500:
+            N_new  = round(N * 0.75)
+            ap_new = round(ap * 0.80, 2)
+            tips.append(
+                f"High power ({power:.0f} W): reduce spindle speed to {N_new} RPM (−25%) "
+                f"and depth of cut to {ap_new} mm (−20%). "
+                f"Combined effect: ~45% power reduction (P ∝ Vc·ap)."
+            )
+        elif power > 800:
+            N_new = round(N * 0.80)
+            tips.append(
+                f"Power {power:.0f} W: reduce spindle speed to {N_new} RPM (−20%) "
+                f"for ~20% energy saving. Vc = π·D·N/1000; power scales linearly with Vc."
+            )
         elif power > 400:
-            tips.append(f"Power ({power:.0f}W) is moderate. Reducing ap by 10-15% with constant MRR will improve energy efficiency.")
+            ap_new = round(ap * 0.85, 2)
+            tips.append(
+                f"Power {power:.0f} W: reduce depth of cut to {ap_new} mm (−15%). "
+                f"Cutting force scales linearly with ap (Fc = Kc1·ap·f^(1-mc)), "
+                f"giving ~15% power reduction with minimal MRR impact if feed is increased proportionally."
+            )
 
-        # Coolant
-        if not cool and mat in ["titanium", "steel_stainless"]:
-            tips.append(f"For {mat}: coolant is strongly recommended — reduces cutting zone temp by ~30%, improves tool life and Ra.")
-        elif not cool and power > 300:
-            tips.append("Enabling coolant reduces total machine energy by ~10% and extends tool life.")
+        # ── 3. Coolant recommendation ─────────────────────────────────────
+        if not cool:
+            if mat in ("titanium", "steel_stainless"):
+                mat_label = _MAT_LABEL.get(mat, mat)
+                tips.append(
+                    f"Enable flood coolant for {mat_label}: "
+                    f"reduces cutting zone temperature ~30–40°C, "
+                    f"lowers tool wear rate, improves Ra by ~10%, "
+                    f"and reduces machine power by ~12% (less friction heat)."
+                )
+            elif power > 500:
+                tips.append(
+                    f"Enable coolant: reduces machine power ~12% by lowering "
+                    f"friction coefficient, and extends tool life."
+                )
 
-        # Tool upgrade
-        if tool == "hss" and mat in ["titanium", "steel_stainless", "cast_iron"]:
-            tips.append(f"Upgrade HSS to carbide for {mat}: allows +50% Vc, reduces specific cutting force, improves energy efficiency.")
+        # ── 4. Tool material upgrade ──────────────────────────────────────
+        if tool == "hss" and mat in ("titanium", "steel_stainless", "cast_iron"):
+            mat_label = _MAT_LABEL.get(mat, mat)
+            tips.append(
+                f"Upgrade from HSS to uncoated carbide for {mat_label}: "
+                f"allows Vc up to 3–5× higher at same tool life (Taylor C increases ~8×), "
+                f"or same Vc with dramatically longer tool life. "
+                f"Specific cutting force Kc1 unchanged but productivity improves significantly."
+            )
+        elif tool == "carbide" and mat == "cast_iron":
+            tips.append(
+                "For cast iron, consider CBN inserts: "
+                "allows Vc 400–600 m/min vs 150–200 m/min for carbide, "
+                "reducing cycle time by ~3× at same power level."
+            )
 
-        # Grinding specific
-        if proc == "grinding" and f > 0.02:
-            tips.append(f"Grinding feed {f} is high — reduce to 0.005–0.01 mm/rev to reduce surface burning and specific energy.")
+        # ── 5. Tool life warning ──────────────────────────────────────────
+        if T_min < 5.0 and T_min > 0:
+            tool_label = _TOOL_LABEL.get(tool, tool)
+            tips.append(
+                f"Tool life estimated at {T_min:.1f} min — critically short. "
+                f"Reduce cutting speed by 30–40% immediately "
+                f"(Taylor equation: T = (C/Vc)^(1/n); halving Vc can increase T by 5–50×). "
+                f"Consider upgrading to a harder tool grade."
+            )
+        elif T_min < 15.0 and T_min > 0:
+            tips.append(
+                f"Tool life ~{T_min:.0f} min is below recommended 15–30 min threshold. "
+                f"Reduce spindle speed by 15–20% to extend tool life."
+            )
 
+        # ── 6. Process-specific ───────────────────────────────────────────
+        if proc == "grinding":
+            # Grinding uses table feed speed (m/min), NOT mm/rev
+            vw = max(f * 10.0, 1.0)   # table speed estimate
+            if vw > 15:
+                tips.append(
+                    f"Grinding table speed ~{vw:.0f} m/min is high. "
+                    f"Reduce to 8–12 m/min to lower specific grinding energy "
+                    f"and prevent thermal damage (grinding burn). "
+                    f"Use Malkin's model: Ra ∝ (vw/vs)^0.5."
+                )
+
+        if proc == "milling":
+            ae = float(inputs.get("width_of_cut") or ap)
+            if ae / D > 0.7:
+                tips.append(
+                    f"Radial engagement {ae/D*100:.0f}% of cutter diameter — high. "
+                    f"Reduce to 50–60% by using smaller step-over. "
+                    f"This lowers average chip load and cutting force by ~20–30%."
+                )
+
+        # ── Fallback if no tips generated ────────────────────────────────
         if not tips:
-            tips.append("Parameters are within efficient operating range. Monitor tool wear periodically and recalibrate Kc values with actual force measurements for better accuracy.")
+            tips.append(
+                f"Current parameters are in an efficient operating range. "
+                f"Power: {power:.0f} W, Ra: {Ra:.2f} μm, MRR: {mrr:.0f} mm³/min, "
+                f"Tool life: {T_min:.0f} min. "
+                f"Monitor tool wear every {max(5, int(T_min*0.5))} min and verify "
+                f"actual cutting forces with a dynamometer for precise Kc1 calibration."
+            )
 
         return " | ".join(tips)
 
+    # ─────────────────────────────────────────────────────────────────────
     def get_info(self) -> Dict[str, Any]:
         has_key = bool(self._api_key)
         return {
             "id":   "huggingface_llm",
-            "name": f"HuggingFace API ({HF_LLM_MODEL.split('/')[-1]})",
+            "name": f"HuggingFace LLM ({HF_LLM_MODEL.split('/')[-1]})",
             "description": (
-                "Physics predictions + LLM expert advice via HuggingFace cloud API. "
-                f"Model runs on HF servers — zero load on your machine. "
-                f"API key: {'✓ configured' if has_key else '✗ not set (add HUGGINGFACE_API_KEY to .env)'}. "
-                "Falls back to rule-based advice if API unavailable."
+                "Physics predictions + Mistral-7B expert advice via HuggingFace cloud API. "
+                "Zero GPU/RAM on your machine — model runs on HF servers. "
+                f"API key: {'✓ configured' if has_key else '✗ not set — add HUGGINGFACE_API_KEY to .env'}. "
+                "Falls back to rule-based engineering advice if API unavailable."
             ),
             "type": "llm",
             "accuracy_metrics": {
-                "Numbers": "Physics-backed",
-                "Advice":  "LLM (cloud) or rule-based",
+                "Numbers": "Physics-backed (same as physics engine)",
+                "Advice":  "LLM (Mistral-7B) or deterministic rule-based",
             },
             "supported_processes": ["turning", "milling", "drilling", "grinding"],
         }
 
     def is_available(self) -> bool:
-        return True  # always available (falls back gracefully)
+        return True
