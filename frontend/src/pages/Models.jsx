@@ -96,7 +96,7 @@ export default function Models() {
       </div>
 
       {/* HuggingFace integration guide */}
-      <div className="how-to-card" style={{ marginTop: 14, borderColor: 'rgba(255,149,0,0.2)' }}>
+      {/* <div className="how-to-card" style={{ marginTop: 14, borderColor: 'rgba(255,149,0,0.2)' }}>
         <div className="card-title" style={{ marginBottom: 14 }}>HuggingFace API Integration (Runs on HF servers, NOT your laptop)</div>
         <div className="how-to-steps">
           {[
@@ -112,7 +112,7 @@ export default function Models() {
             </div>
           ))}
         </div>
-      </div>
+      </div> */}
     </div>
   )
 }

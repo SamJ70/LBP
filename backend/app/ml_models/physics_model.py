@@ -1,31 +1,3 @@
-"""
-PHYSICS-BASED MODEL — Corrected Engineering Equations
-======================================================
-All formulas verified against:
-  - Boothroyd & Knight "Fundamentals of Machining and Machine Tools" 3rd ed.
-  - Sandvik Coromant Machining Handbook (Vc/T reference data)
-  - Kienzle specific cutting force model (1952)
-  - ISO 3685 Taylor tool life testing standard
-
-BUGS FIXED vs. previous version
----------------------------------
-1. Cutting force: was Fc = Kc * f^0.18 * ap^0.92  (wrong exponents, gave 3x too high Fc)
-   Fixed to Kienzle: Fc = Kc1 * ap * f^(1-mc)  (ap linear, mc≈0.15-0.28 per material)
-
-2. Surface roughness: was Ra = f²/(8·rε) × 1000 = 7 μm at f=0.15
-   Fixed to Boothroyd: Ra = 32·f²/rε  giving 1.8 μm at f=0.15 — matches measurements
-
-3. Taylor constants: were C=150 for stainless, giving T≈0 for ALL tools at ANY Vc
-   Fixed: C = Vc_ref × T_ref^n  calibrated to Sandvik reference points
-   e.g. carbide on stainless: Vc_ref=80 m/min → T_ref=60 min → C=222.7
-
-4. Optimizer Ra_max hardcoded to 3.2 μm (rejecting everything for rough surfaces)
-   Fixed: Ra_max = current_Ra × 1.10  (adaptive — always finds real improvements)
-
-5. Optimizer T_min hardcoded to 15 min (rejecting all HSS on hard materials)
-   Fixed: T_min adaptive from actual T at current params
-"""
-
 import math
 import itertools
 from typing import Dict, Any, Tuple
@@ -190,7 +162,6 @@ class PhysicsBasedModel(BaseMLModel):
             "surface_roughness":  round(max(0.05, min(Ra, 15.0)), 3),
             "tool_wear_rate":     round(max(0.0, wear_rate), 6),
             "mrr":                round(max(0.1, mrr), 1),
-            "confidence_score":   0.82,
             # Extra info used by optimizer and advice engine
             "tool_life_min":      round(min(T_life, 9999.0), 1),
             "vc_mpm":             round(Vc, 2),

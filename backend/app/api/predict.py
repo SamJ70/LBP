@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from app.models.schemas import MachiningInput, OptimizationResult, PredictionOutput
 from app.services.model_registry import get_model
-from app.ml_models.huggingface_model import HuggingFaceModel
+from app.ml_models.groq_model import GroqModel
 from typing import Dict, Any
 
 router = APIRouter()
@@ -98,8 +98,8 @@ def optimize(inp: MachiningInput):
         # ── Expert advice ─────────────────────────────────────────────────
         # Always use the original (non-optimized) inputs for advice context,
         # then the optimized predictions as the reference point
-        hf = HuggingFaceModel()
-        if inp.model_id == "huggingface_llm":
+        hf = GroqModel()
+        if inp.model_id == "groq_llm":
             ai_advice = hf.get_advice(opt_params, opt_preds_raw)
         else:
             # For physics and sklearn, give advice on optimized params + results

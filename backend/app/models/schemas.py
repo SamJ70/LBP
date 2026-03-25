@@ -45,7 +45,6 @@ class PredictionOutput(BaseModel):
     surface_roughness:  float = Field(..., description="Estimated Ra in micrometers")
     tool_wear_rate:     float = Field(..., description="Estimated tool wear rate mm/min")
     mrr:                float = Field(..., description="Material Removal Rate mm³/min")
-    confidence_score:   float = Field(..., description="Model confidence 0-1")
 
 
 class OptimizationResult(BaseModel):

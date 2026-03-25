@@ -1,37 +1,14 @@
-"""
-MODEL REGISTRY
-==============
-Central registry for all prediction engines.
-
-DEFAULT: physics_based — runs immediately, no setup, uses engineering equations.
-
-To add a new AI model:
-1. Create a class in ml_models/ that extends BaseMLModel
-2. Implement predict() and get_info() methods
-3. Register it below in MODEL_REGISTRY
-
-The frontend automatically shows all registered models.
-Physics model is always listed first (default).
-"""
-
 from typing import Dict, Type
 from app.ml_models.base_model import BaseMLModel
 from app.ml_models.physics_model import PhysicsBasedModel
 from app.ml_models.sklearn_baseline import SklearnBaselineModel
-from app.ml_models.huggingface_model import HuggingFaceModel
+from app.ml_models.groq_model import GroqModel
 
-# ============================================================
-# ORDER MATTERS — first entry is the default
-# ============================================================
+# First entry is the default model used if client doesn't specify one
 MODEL_REGISTRY: Dict[str, Type[BaseMLModel]] = {
-    "physics_based":    PhysicsBasedModel,    # DEFAULT — always available, no setup
-    "sklearn_baseline": SklearnBaselineModel, # ML model — auto-trains on first run
-    "huggingface_llm":  HuggingFaceModel,     # Cloud API — needs HUGGINGFACE_API_KEY in .env
-
-    # ---- ADD YOUR TRAINED MODELS HERE ----
-    # "my_pytorch_model": MyPyTorchModel,
-    # "my_xgboost":       MyXGBoostModel,
-    # "my_custom_cnn":    MyCustomCNNModel,
+    "physics_based":    PhysicsBasedModel, 
+    "sklearn_baseline": SklearnBaselineModel,
+    "groq_llm":  GroqModel,
 }
 
 _instances: Dict[str, BaseMLModel] = {}
@@ -48,7 +25,7 @@ def get_model(model_id: str) -> BaseMLModel:
 
 def list_models():
     result = []
-    for model_id, model_class in MODEL_REGISTRY.items():
+    for model_id, _ in MODEL_REGISTRY.items():
         try:
             inst = get_model(model_id)
             info = inst.get_info()

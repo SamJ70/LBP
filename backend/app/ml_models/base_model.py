@@ -1,23 +1,3 @@
-"""
-BASE MODEL
-==========
-All AI models must extend this class. Implement predict() and get_info().
-
-The default optimize() method here is used by SklearnBaselineModel and HuggingFaceModel.
-PhysicsBasedModel overrides it with a more precise Taylor-constraint version.
-
-Optimizer design (corrected):
-  Objective : minimize energy_consumption (Watts)
-  Ra  ≤ Ra_current × 1.10   — quality maintained within 10%
-  MRR ≥ MRR_current × 0.30  — productivity floor (no trivially slow solutions)
-  Speed search: 50%→100% only — increasing speed always increases power (P ∝ Vc)
-  Feed search : 40%→100%      — lower feed → better Ra but lower MRR
-  DoC  search : 50%→100%      — lower DoC → lower cutting force → lower power
-
-FIX: old version searched speed up to 130% and had no MRR floor, causing trivial
-     minimum-everything solutions that destroyed productivity.
-"""
-
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Tuple
 import itertools

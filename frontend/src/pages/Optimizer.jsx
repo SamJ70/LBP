@@ -70,7 +70,7 @@ export default function Optimizer() {
     width_of_cut:  params.width_of_cut ? parseFloat(params.width_of_cut) : null,
     tool_diameter: params.tool_diameter ? parseFloat(params.tool_diameter) : null,
     coolant_used:  coolant,
-    model_id:      modelId,
+    model_id:      "sklearn_baseline",
   })
 
   const handleRun = async () => {

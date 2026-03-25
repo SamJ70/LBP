@@ -50,7 +50,7 @@ function PredictResults({ data }) {
     { metric: 'Surface',    value: Math.min(100, Math.max(0, (1 - data.surface_roughness / 10) * 100)) },
     { metric: 'Tool Life',  value: Math.min(100, Math.max(0, (toolLifeMin / 120) * 100)) },
     { metric: 'MRR',        value: Math.min(100, Math.max(0, data.mrr / 500)) },
-    { metric: 'Confidence', value: Math.min(100, data.confidence_score * 100) },
+    // { metric: 'Confidence', value: Math.min(100, data.confidence_score * 100) },
   ]
   const raColor = data.surface_roughness < 1.6 ? '' : data.surface_roughness < 3.2 ? 'warn' : 'danger'
 
@@ -78,11 +78,11 @@ function PredictResults({ data }) {
       </div>
 
       <div className="card">
-        <div className="card-title">Model Confidence</div>
+        {/* <div className="card-title">Model Confidence</div>
         <ConfidenceBar score={data.confidence_score} />
         <p style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--muted)', marginTop: 6 }}>
           Higher confidence = more reliable predictions. Physics model = deterministic; ML models = probabilistic.
-        </p>
+        </p> */}
         {data.equations_used && (
           <div className="equation-note">{data.equations_used}</div>
         )}
