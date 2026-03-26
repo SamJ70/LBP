@@ -3,18 +3,6 @@ import itertools
 from typing import Dict, Any, Tuple
 from app.ml_models.base_model import BaseMLModel
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# MATERIAL DATA  — calibrated to machining handbooks
-#
-#  Kc1  = specific cutting force at chip thickness h=1 mm  (N/mm²)  Kienzle
-#  mc   = Kienzle exponent  (0.10–0.30 typical)
-#  n    = Taylor exponent in Vc·T^n = C  (0.10–0.50 typical)
-#  C    = Taylor constant   C = Vc_ref · T_ref^n   (units: m/min)
-#           Ref points (carbide, T_ref=60 min): Al=500, mild=200, SS=80,
-#                                               CI=200, Ti=60, Cu=400 m/min
-#  ra_k = Ra correction for material work-hardening and built-up edge effects
-# ─────────────────────────────────────────────────────────────────────────────
 MATERIALS = {
     #                      Kc1   mc     n      C      ra_k
     "aluminum":         (  700, 0.15, 0.25, 1392.0, 0.75),
@@ -25,17 +13,6 @@ MATERIALS = {
     "copper":           (  900, 0.12, 0.28, 1258.8, 0.75),
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TOOL DATA — multipliers on Taylor C and n relative to carbide baseline
-#
-#  Cm  = C multiplier   (higher Cm = tool handles higher speed for same life)
-#  nm  = n multiplier   (higher nm = flatter speed-life curve = more forgiving)
-#
-#  Validated: carbide on mild steel Vc_ref=200 → C=556.6
-#  HSS on mild steel: Vc_ref≈30 m/min for T=60 min
-#    C_hss = 30 × 60^0.207 = 30 × 2.36 = 70.8
-#    Cm = 70.8 / 556.6 = 0.127  ≈ 0.12 ✓
-# ─────────────────────────────────────────────────────────────────────────────
 TOOLS = {
     #            Cm     nm
     "hss":     (0.12, 0.83),  # max usable Vc ≈ 12% of carbide
@@ -47,15 +24,10 @@ TOOLS = {
 
 EFF = {"turning": 0.75, "milling": 0.70, "drilling": 0.65, "grinding": 0.55}
 COOLANT_POWER  = 0.88   # ~12% power reduction (heat extraction changes friction)
-COOLANT_RA     = 0.90   # ~10% better Ra with flood coolant
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PHYSICS HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+COOLANT_RA     = 0.90
 
 def _vc(D_mm: float, N_rpm: float) -> float:
-    """Cutting speed  Vc = π·D·N / 1000  (m/min)"""
+    """Cutting speed (m/min)"""
     return math.pi * D_mm * N_rpm / 1000.0
 
 def _rpm(Vc_mpm: float, D_mm: float) -> float:
@@ -63,38 +35,21 @@ def _rpm(Vc_mpm: float, D_mm: float) -> float:
     return (Vc_mpm * 1000.0) / (math.pi * D_mm) if D_mm > 0 else 800.0
 
 def _taylor_life(Vc: float, C: float, n: float) -> float:
-    """
-    Taylor tool life equation (standard form):
-      Vc · T^n = C   →   T = (C / Vc)^(1/n)
-    Returns tool life T in minutes.
-    """
+    """Tool life in minutes."""
     if Vc <= 0:
         return 9999.0
     return (C / Vc) ** (1.0 / n)
 
 def _ra_turning(f_mm: float, r_nose_mm: float = 0.4) -> float:
-    """
-    Boothroyd & Knight theoretical Ra for turning:
-      Ra = 32 · f² / r_ε    (μm)   f in mm/rev, r_ε in mm
-    Matches literature: f=0.15, r=0.4 → Ra≈1.8 μm  ✓
-    """
+    """Ra for turning (μm)"""
     return 32.0 * (f_mm ** 2) / r_nose_mm
 
 def _kienzle_force(Kc1: float, mc: float, f_mm: float, ap_mm: float) -> float:
-    """
-    Kienzle (1952) cutting force model:
-      Fc = Kc1 · ap · f^(1–mc)
-    Kc1 in N/mm², ap in mm, f in mm/rev → Fc in Newtons
-    Physically: ap = chip width, f = chip thickness parameter
-    """
+    """Cutting force (N)"""
     return Kc1 * ap_mm * (f_mm ** (1.0 - mc))
 
 def _machine_power_W(Fc_N: float, Vc_mpm: float, efficiency: float) -> float:
-    """
-    Machine power from cutting force:
-      P_cut  = Fc(N) · Vc(m/min) / 60   (W)   [N·m/s = W, /60 converts min→s]
-      P_mach = P_cut / η
-    """
+    """Machine power (W)"""
     return (Fc_N * Vc_mpm / 60.0) / efficiency
 
 
@@ -153,6 +108,8 @@ class PhysicsBasedModel(BaseMLModel):
         if cool:
             power *= COOLANT_POWER
             Ra    *= COOLANT_RA
+            C_eff *= 1.2        # tool life improvement
+            Fc    *= 0.92       # force reduction from flood coolant lubrication
 
         T_life    = _taylor_life(Vc, C_eff, n_eff)
         wear_rate = 1.0 / max(T_life, 0.01) * 0.5  # proportional inverse
@@ -168,22 +125,8 @@ class PhysicsBasedModel(BaseMLModel):
         }
 
     # ─────────────────────────────────────────────────────────────────────────
-    def optimize(self, inputs: Dict[str, Any], constraints: Dict[str, Any] = None) -> Tuple[Dict, Dict]:
-        """
-        Constrained energy minimization.
-
-        Objective:   minimize P_machine (Watts)
-        Constraints:
-          Ra  ≤ Ra_current × 1.10   (maintain surface quality, allow ≤10% degradation)
-          T   ≥ T_min_adaptive       (tool life floor, auto-scaled from current T)
-          MRR ≥ MRR_current × 0.60  (productivity floor — keep at least 60% output)
-
-        Physics insight: P_mach = Kc1·ap·f^(1-mc)·Vc / (60·η)
-          → P ∝ Vc·ap·f^(1-mc)
-          → Reducing Vc and ap gives most energy reduction
-          → Reducing f improves Ra but reduces MRR
-          → Real optimum exists where these constraints bind
-        """
+    def optimize(self, inputs: Dict[str, Any], constraints: Dict[str, Any] = None) -> Tuple[Dict, Dict, Dict]:
+        """Constrained energy minimization."""
         constraints = constraints or {}
 
         current   = self.predict(inputs)
@@ -203,18 +146,27 @@ class PhysicsBasedModel(BaseMLModel):
         Vc_cur = _vc(D, N)
         T_cur  = _taylor_life(Vc_cur, C_eff, n_eff)
 
-        Ra_max  = constraints.get("max_surface_roughness", Ra_cur * 1.10)
-        MRR_min = MRR_cur * 0.60   # keep ≥60% productivity — realistic for production
+        Ra_max  = constraints.get("max_surface_roughness_factor", 1.10) * Ra_cur
+        MRR_min = constraints.get("min_mrr_factor", 0.60) * MRR_cur
 
         # Adaptive T_min — never filters out everything
-        if T_cur >= 30:
-            T_min = 15.0
-        elif T_cur >= 10:
-            T_min = 5.0
-        elif T_cur >= 2:
-            T_min = 1.0
+        if constraints and constraints.get("min_tool_life") is not None:
+            T_min = constraints["min_tool_life"]
         else:
-            T_min = 0.0  # current tool life already terrible, no additional constraint
+            if T_cur >= 30:
+                T_min = 15.0
+            elif T_cur >= 10:
+                T_min = 5.0
+            elif T_cur >= 2:
+                T_min = 1.0
+            else:
+                T_min = 0.0  # current tool life already terrible, no additional constraint
+        
+        applied_constraints = {
+            "max_surface_roughness_factor": constraints.get("max_surface_roughness_factor", 1.10),
+            "min_mrr_factor": constraints.get("min_mrr_factor", 0.60),
+            "min_tool_life": T_min
+        }
 
         # Search grid — biased toward lower Vc and ap (energy reduction direction)
         Vc_scales = [0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00, 1.10, 1.20, 1.30]
@@ -269,7 +221,7 @@ class PhysicsBasedModel(BaseMLModel):
             best_params = inputs
             best_preds  = current
 
-        return best_params, best_preds
+        return best_params, best_preds, applied_constraints
 
     # ─────────────────────────────────────────────────────────────────────────
     def get_info(self) -> Dict[str, Any]:

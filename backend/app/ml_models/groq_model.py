@@ -41,16 +41,12 @@ class GroqModel(BaseMLModel):
 
     # ─────────────────────────────────────────────────────────────────────
     def predict(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        """Numeric predictions always from physics (reliable, deterministic)."""
+        """Numeric predictions always from physics."""
         preds = self._physics.predict(inputs)
         return preds
 
-    def optimize(self, inputs: Dict[str, Any], constraints: Dict[str, Any] = None) -> Tuple[Dict, Dict]:
-        """
-        Use physics optimizer directly — HF model gives identical numeric results
-        since predict() is physics-backed. No point calling base_model grid search
-        separately; physics optimizer is more accurate (includes Taylor constraints).
-        """
+    def optimize(self, inputs: Dict[str, Any], constraints: Dict[str, Any] = None) -> Tuple[Dict, Dict, Dict]:
+        """Use physics optimizer directly."""
         return self._physics.optimize(inputs, constraints)
 
     # ─────────────────────────────────────────────────────────────────────
@@ -91,11 +87,7 @@ class GroqModel(BaseMLModel):
             return f"[Groq API error: {str(e)}]"
 
     def _validate_llm_response(self, text: str) -> bool:
-        """
-        Reject LLM output that is clearly hallucinated or irrelevant.
-        Checks: non-empty, contains at least one digit (real advice has numbers),
-                not an error message, not excessively short.
-        """
+        """Reject invalid LLM output."""
         if not text or text.startswith("["):
             return False
         if len(text) < 40:
@@ -104,11 +96,7 @@ class GroqModel(BaseMLModel):
         return has_number
 
     def get_advice(self, inputs: Dict[str, Any], predictions: Dict[str, Any]) -> str:
-        """
-        Generate expert recommendations.
-        Uses LLM if API key is present and response passes validation.
-        Falls back to deterministic rule-based advice otherwise.
-        """
+        """Generate expert recommendations."""
         if self._api_key:
             llm_text = self._call_llm(self._build_prompt(inputs, predictions))
             if self._validate_llm_response(llm_text):
@@ -117,10 +105,7 @@ class GroqModel(BaseMLModel):
         return self._engineering_advice(inputs, predictions)
 
     def _build_prompt(self, inputs: Dict[str, Any], predictions: Dict[str, Any]) -> str:
-        """
-        High-quality engineering prompt for LLM.
-        Focus: grounded, numeric, constraint-aware recommendations.
-        """
+        """Engineering prompt for LLM."""
 
         proc  = _PROC_LABEL.get(inputs.get("process_type","turning"), inputs.get("process_type",""))
         mat   = _MAT_LABEL.get(inputs.get("material","steel_mild"), inputs.get("material",""))
@@ -185,15 +170,7 @@ class GroqModel(BaseMLModel):
         )
 
     def _engineering_advice(self, inputs: Dict[str, Any], predictions: Dict[str, Any]) -> str:
-        """
-        Deterministic rule-based engineering advice.
-        All tips are physically correct and grounded in machining handbook data.
-
-        FIX: removed wrong tip 'reduce DoC + increase speed' (that increases power).
-        FIX: feed suggestion now uses correct Ra = 32*f²/r formula.
-        FIX: grinding advice uses correct units (table speed, not mm/rev).
-        FIX: all advice cross-checked against P = Kc·ap·f^(1-mc)·Vc / (60·η).
-        """
+        """Deterministic rule-based engineering advice."""
         tips = []
         Ra    = float(predictions.get("surface_roughness", 0))
         power = float(predictions.get("energy_consumption", 0))
@@ -209,7 +186,6 @@ class GroqModel(BaseMLModel):
         D     = float(inputs.get("tool_diameter") or 20.0)
 
         # ── 1. Surface roughness guidance ─────────────────────────────────
-        # Ra = 32·f²/r  →  to hit Ra_target: f_new = f × sqrt(Ra_target/Ra_current)
         r_nose = 0.4
         if Ra > 3.2 and proc in ("turning", "milling", "drilling"):
             f_new = round(f * math.sqrt(3.2 / Ra), 3)
@@ -226,10 +202,6 @@ class GroqModel(BaseMLModel):
             )
 
         # ── 2. Energy reduction ───────────────────────────────────────────
-        # P = Kc·ap·f^(1-mc)·Vc / (60·η)  →  P ∝ ap × Vc
-        # Most effective lever: reduce spindle speed (direct Vc effect)
-        # Secondary: reduce ap (reduces Fc linearly)
-        # Wrong: "increase speed" never reduces energy
         Kc1, mc, _, _, _ = MATERIALS.get(mat, MATERIALS["steel_mild"])
         if power > 1500:
             N_new  = round(N * 0.75)
@@ -302,8 +274,7 @@ class GroqModel(BaseMLModel):
 
         # ── 6. Process-specific ───────────────────────────────────────────
         if proc == "grinding":
-            # Grinding uses table feed speed (m/min), NOT mm/rev
-            vw = max(f * 10.0, 1.0)   # table speed estimate
+            vw = max(f * 10.0, 1.0)
             if vw > 15:
                 tips.append(
                     f"Grinding table speed ~{vw:.0f} m/min is high. "

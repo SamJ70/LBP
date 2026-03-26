@@ -103,16 +103,7 @@ def _build_feature_row(inputs: Dict[str, Any], physics_pred: Dict[str, Any]) -> 
 
 
 def _generate_training_data(n: int = 3000, seed: int = 42) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Generate synthetic residual-learning data.
-
-    X = [input params + physics outputs]
-    Y = [delta_energy, delta_ra, delta_wear, delta_mrr]
-
-    We simulate "real-world" values by applying structured, input-dependent noise
-    on top of the physics output. That gives the ML model a meaningful residual
-    target to learn.
-    """
+    """Generate synthetic residual-learning data."""
     from app.ml_models.physics_model import PhysicsBasedModel
 
     rng = random.Random(seed)
@@ -144,10 +135,6 @@ def _generate_training_data(n: int = 3000, seed: int = 42) -> Tuple[np.ndarray, 
 
         physics_pred = physics.predict(inp)
 
-        # Structured noise model:
-        # - harder materials tend to show larger deviations
-        # - missing coolant tends to worsen Ra and wear
-        # - higher speed tends to increase deviation slightly
         hard_material = material in {"steel_stainless", "titanium", "cast_iron"}
         soft_material = material in {"aluminum", "copper"}
         coolant = bool(inp["coolant_used"])
@@ -169,8 +156,6 @@ def _generate_training_data(n: int = 3000, seed: int = 42) -> Tuple[np.ndarray, 
         if soft_material:
             base_scale -= 0.01
 
-        # "Real" outputs are physics outputs perturbed by structured residuals.
-        # These residuals are what the model learns.
         energy_bias = 0.0
         ra_bias = 0.0
         wear_bias = 0.0
@@ -226,12 +211,7 @@ def _generate_training_data(n: int = 3000, seed: int = 42) -> Tuple[np.ndarray, 
 
 
 def _train_and_save():
-    """
-    Train a multi-output regression model on residuals and save it to disk.
-
-    The saved artifact is a dict, not just the pipeline, so future versions can
-    inspect metadata without breaking backwards compatibility.
-    """
+    """Train and save residual model."""
     from sklearn.ensemble import GradientBoostingRegressor
     from sklearn.multioutput import MultiOutputRegressor
     from sklearn.pipeline import Pipeline
@@ -273,14 +253,7 @@ def _train_and_save():
 
 
 class SklearnBaselineModel(BaseMLModel):
-    """
-    Residual-correction model.
-
-    Predict() returns final corrected outputs:
-        physics_output + predicted_delta
-
-    This keeps the API stable while making the ML model actually useful.
-    """
+    """Residual-correction model."""
 
     def __init__(self):
         self._artifact = None
@@ -294,8 +267,6 @@ class SklearnBaselineModel(BaseMLModel):
             with open(MODEL_PATH, "rb") as f:
                 loaded = pickle.load(f)
 
-            # Backward compatibility: support both old plain pipeline pickle
-            # and the new artifact dict format.
             if isinstance(loaded, dict) and "model" in loaded:
                 self._artifact = loaded
                 self._model = loaded["model"]
@@ -328,12 +299,7 @@ class SklearnBaselineModel(BaseMLModel):
         physics_pred: Dict[str, Any],
         deltas: np.ndarray,
     ) -> float:
-        """
-        Heuristic confidence score:
-        - higher when inputs lie within the synthetic training domain
-        - lower when residual corrections are large
-        This is not a probabilistic confidence; it is a simple usability metric.
-        """
+        """Heuristic confidence score."""
         values = {
             "spindle_speed": _coerce_float(inputs.get("spindle_speed"), 800.0),
             "feed_rate": _coerce_float(inputs.get("feed_rate"), 0.15),
@@ -362,8 +328,6 @@ class SklearnBaselineModel(BaseMLModel):
 
         residual_ratio = 0.0
         if deltas.size > 0:
-            # Normalize by the magnitude of physics predictions to avoid over-penalizing
-            # large absolute units like energy and MRR.
             denom = np.array(
                 [
                     max(abs(_coerce_float(physics_pred.get("energy_consumption"), 1.0)), 1.0),
@@ -379,10 +343,7 @@ class SklearnBaselineModel(BaseMLModel):
         return float(_clamp(confidence, 0.50, 0.97))
 
     def predict(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Return final corrected predictions:
-            final = physics + predicted_delta
-        """
+        """Return final corrected predictions."""
         self._load()
 
         physics_pred = self._physics_predict(inputs)

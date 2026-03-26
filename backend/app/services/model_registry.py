@@ -3,12 +3,12 @@ from app.ml_models.base_model import BaseMLModel
 from app.ml_models.physics_model import PhysicsBasedModel
 from app.ml_models.sklearn_baseline import SklearnBaselineModel
 from app.ml_models.groq_model import GroqModel
+from app.ml_models.calculated_baseline import CalculatedBaselineModel
 
 # First entry is the default model used if client doesn't specify one
 MODEL_REGISTRY: Dict[str, Type[BaseMLModel]] = {
-    "physics_based":    PhysicsBasedModel, 
     "sklearn_baseline": SklearnBaselineModel,
-    "groq_llm":  GroqModel,
+    "calculated_baseline": CalculatedBaselineModel,
 }
 
 _instances: Dict[str, BaseMLModel] = {}
