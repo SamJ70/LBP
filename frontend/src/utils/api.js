@@ -5,9 +5,6 @@ const api = axios.create({
   timeout: 60000,
 })
 
-export const predictParams = (data) =>
-  api.post('/predict/', data).then(r => r.data)
-
 export const optimizeParams = (data) =>
   api.post('/predict/optimize', data).then(r => r.data)
 

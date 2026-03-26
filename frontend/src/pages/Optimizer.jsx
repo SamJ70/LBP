@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { predictParams, optimizeParams, fetchModels } from '../utils/api'
+import { optimizeParams, fetchModels } from '../utils/api'
 import ResultsPanel from '../components/ResultsPanel'
 import { Cpu, Zap } from 'lucide-react'
 
@@ -50,37 +50,47 @@ export default function Optimizer() {
   const [coolant, setCoolant] = useState(false)
   const [models, setModels] = useState([])
   const [params, setParams] = useState(DEFAULTS['turning'])
+  const [constraints, setConstraints] = useState({
+    max_surface_roughness_factor: '',
+    min_mrr_factor: '',
+    min_tool_life: '',
+  })
   const [results, setResults] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-  const [mode, setMode] = useState('predict')
 
   useEffect(() => { fetchModels().then(setModels).catch(console.error) }, [])
   useEffect(() => { setParams(DEFAULTS[process]) }, [process])
 
   const setParam = (k, v) => setParams(p => ({ ...p, [k]: v }))
 
-  const buildPayload = () => ({
-    process_type:  process,
-    material,
-    tool_material: toolMat,
-    spindle_speed: parseFloat(params.spindle_speed),
-    feed_rate:     parseFloat(params.feed_rate),
-    depth_of_cut:  parseFloat(params.depth_of_cut),
-    width_of_cut:  params.width_of_cut ? parseFloat(params.width_of_cut) : null,
-    tool_diameter: params.tool_diameter ? parseFloat(params.tool_diameter) : null,
-    coolant_used:  coolant,
-    model_id:      modelId,
-  })
+  const buildPayload = () => {
+    const payload = {
+      process_type:  process,
+      material,
+      tool_material: toolMat,
+      spindle_speed: parseFloat(params.spindle_speed),
+      feed_rate:     parseFloat(params.feed_rate),
+      depth_of_cut:  parseFloat(params.depth_of_cut),
+      width_of_cut:  params.width_of_cut ? parseFloat(params.width_of_cut) : null,
+      tool_diameter: params.tool_diameter ? parseFloat(params.tool_diameter) : null,
+      coolant_used:  coolant,
+      model_id:      modelId,
+    }
+    if (constraints.max_surface_roughness_factor) payload.max_surface_roughness_factor = parseFloat(constraints.max_surface_roughness_factor)
+    if (constraints.min_mrr_factor) payload.min_mrr_factor = parseFloat(constraints.min_mrr_factor)
+    if (constraints.min_tool_life) payload.min_tool_life = parseFloat(constraints.min_tool_life)
+    return payload
+  }
 
   const handleRun = async () => {
     setLoading(true); setError(null); setResults(null)
     try {
       const payload = buildPayload()
-      const data = mode === 'optimize' ? await optimizeParams(payload) : await predictParams(payload)
-      setResults({ mode, data })
+      const data = await optimizeParams(payload)
+      setResults({ mode: 'optimize', data })
       const hist = JSON.parse(localStorage.getItem('miq_history') || '[]')
-      hist.unshift({ ts: Date.now(), mode, process, material, modelId, payload, result: data })
+      hist.unshift({ ts: Date.now(), mode: 'optimize', process, material, modelId, payload, result: data })
       localStorage.setItem('miq_history', JSON.stringify(hist.slice(0, 50)))
     } catch (e) {
       setError(e.response?.data?.detail || e.message)
@@ -167,6 +177,26 @@ export default function Optimizer() {
             </Field>
           </div>
 
+          {/* Optimization Constraints */}
+          <div className="card">
+            <div className="card-title">Optimization Constraints <span style={{fontSize: 10, color: 'var(--muted)', fontWeight: 'normal'}}>(Optional)</span></div>
+            <p style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--muted)', marginBottom: 12, lineHeight: 1.4 }}>
+              If left empty, dynamic defaults are applied (e.g. Ra ≤ 1.1x, MRR ≥ 0.6x).
+            </p>
+            <Field label="Max Surface Roughness (≤ X × original)">
+              <input type="number" className="input-field" value={constraints.max_surface_roughness_factor} placeholder="e.g. 1.1"
+                onChange={e => setConstraints(c => ({ ...c, max_surface_roughness_factor: e.target.value }))} min={0.1} step={0.1} />
+            </Field>
+            <Field label="Min MRR (≥ X × original)">
+              <input type="number" className="input-field" value={constraints.min_mrr_factor} placeholder="e.g. 0.6"
+                onChange={e => setConstraints(c => ({ ...c, min_mrr_factor: e.target.value }))} min={0.1} step={0.1} />
+            </Field>
+            <Field label="Min Tool Life (≥ X min)">
+              <input type="number" className="input-field" value={constraints.min_tool_life} placeholder="e.g. 15"
+                onChange={e => setConstraints(c => ({ ...c, min_tool_life: e.target.value }))} min={1} step={1} />
+            </Field>
+          </div>
+
           {/* Model selector */}
           <div className="card">
             <div className="card-title"><Cpu size={11} /> Prediction Engine</div>
@@ -192,20 +222,12 @@ export default function Optimizer() {
             )}
           </div>
 
-          {/* Mode + Run */}
+          {/* Run */}
           <div className="card">
-            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-              <button onClick={() => setMode('predict')} className={`btn-tab${mode === 'predict' ? ' active' : ''}`}>
-                Predict Only
-              </button>
-              <button onClick={() => setMode('optimize')} className={`btn-tab${mode === 'optimize' ? ' active' : ''}`}>
-                ⚡ Optimize
-              </button>
-            </div>
             <button onClick={handleRun} disabled={loading} className="btn-primary full">
               {loading
                 ? <><div className="loading-dots"><span /><span /><span /></div> Running...</>
-                : <><Zap size={14} /> {mode === 'optimize' ? 'Run Optimization' : 'Run Prediction'}</>
+                : <><Zap size={14} /> Run Optimization</>
               }
             </button>
             {error && <div className="error-box">{error}</div>}

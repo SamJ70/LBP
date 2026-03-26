@@ -39,13 +39,17 @@ class MachiningInput(BaseModel):
     coolant_used:  bool  = Field(False, description="Whether coolant is used")
     model_id:      str   = Field("physics_based", description="Prediction engine to use")
 
+    # Optional user-defined constraints
+    max_surface_roughness_factor: Optional[float] = Field(None, description="Maximum allowed Ra factor (e.g. 1.1)")
+    min_mrr_factor:               Optional[float] = Field(None, description="Minimum allowed MRR factor (e.g. 0.6)")
+    min_tool_life:                Optional[float] = Field(None, description="Minimum allowed tool life in minutes")
+
 
 class PredictionOutput(BaseModel):
     energy_consumption: float = Field(..., description="Estimated power in Watts")
     surface_roughness:  float = Field(..., description="Estimated Ra in micrometers")
     tool_wear_rate:     float = Field(..., description="Estimated tool wear rate mm/min")
     mrr:                float = Field(..., description="Material Removal Rate mm³/min")
-    confidence_score:   float = Field(..., description="Model confidence 0-1")
 
 
 class OptimizationResult(BaseModel):
@@ -59,6 +63,7 @@ class OptimizationResult(BaseModel):
     model_used:             str
     ai_advice:              Optional[str] = None
     optimization_method:    Optional[str] = None
+    applied_constraints:    Optional[Dict[str, Any]] = None
 
 
 class ModelInfo(BaseModel):

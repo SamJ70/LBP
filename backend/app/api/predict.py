@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from app.models.schemas import MachiningInput, OptimizationResult, PredictionOutput
 from app.services.model_registry import get_model
-from app.ml_models.huggingface_model import HuggingFaceModel
+from app.ml_models.groq_model import GroqModel
 from typing import Dict, Any
 
 router = APIRouter()
@@ -22,21 +22,10 @@ def _to_dict(inp: MachiningInput) -> Dict[str, Any]:
 
 
 def _safe_pred(preds: dict) -> PredictionOutput:
-    """Strip extra physics-internal keys (tool_life_min, vc_mpm) before returning."""
+    """Strip internal keys."""
     fields = PredictionOutput.model_fields.keys()
     return PredictionOutput(**{k: preds[k] for k in fields if k in preds})
 
-
-@router.post("/", response_model=PredictionOutput)
-def predict(inp: MachiningInput):
-    try:
-        model  = get_model(inp.model_id)
-        result = model.predict(_to_dict(inp))
-        return _safe_pred(result)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {e}")
 
 
 @router.post("/optimize", response_model=OptimizationResult)
@@ -45,8 +34,16 @@ def optimize(inp: MachiningInput):
         model      = get_model(inp.model_id)
         input_dict = _to_dict(inp)
 
+        constraints = {}
+        if inp.max_surface_roughness_factor is not None:
+            constraints["max_surface_roughness_factor"] = inp.max_surface_roughness_factor
+        if inp.min_mrr_factor is not None:
+            constraints["min_mrr_factor"] = inp.min_mrr_factor
+        if inp.min_tool_life is not None:
+            constraints["min_tool_life"] = inp.min_tool_life
+
         original_preds_raw        = model.predict(input_dict)
-        opt_params, opt_preds_raw = model.optimize(input_dict)
+        opt_params, opt_preds_raw, applied_constraints = model.optimize(input_dict, constraints)
 
         original_preds = _safe_pred(original_preds_raw)
         opt_preds      = _safe_pred(opt_preds_raw)
@@ -55,10 +52,8 @@ def optimize(inp: MachiningInput):
         E_opt  = opt_preds.energy_consumption
         savings_pct = ((E_orig - E_opt) / E_orig * 100.0) if E_orig > 0 else 0.0
 
-        # Quality maintained = Ra within 5% of original
         quality_ok = opt_preds.surface_roughness <= original_preds.surface_roughness * 1.05
 
-        # ── Parameter change notes ────────────────────────────────────────
         notes = []
         dN  = float(opt_params.get("spindle_speed", inp.spindle_speed))
         df  = float(opt_params.get("feed_rate",     inp.feed_rate))
@@ -76,7 +71,6 @@ def optimize(inp: MachiningInput):
         if not notes:
             notes.append("Current parameters are already at the energy-optimal point for these constraints.")
 
-        # ── Optimization method description ───────────────────────────────
         model_info = model.get_info()
         if model_info.get("type") == "physics":
             opt_method = (
@@ -95,14 +89,10 @@ def optimize(inp: MachiningInput):
                 f"minimize energy subject to Ra ≤ Ra_current×1.1, MRR ≥ MRR_current×0.30"
             )
 
-        # ── Expert advice ─────────────────────────────────────────────────
-        # Always use the original (non-optimized) inputs for advice context,
-        # then the optimized predictions as the reference point
-        hf = HuggingFaceModel()
-        if inp.model_id == "huggingface_llm":
+        hf = GroqModel()
+        if inp.model_id == "groq_llm":
             ai_advice = hf.get_advice(opt_params, opt_preds_raw)
         else:
-            # For physics and sklearn, give advice on optimized params + results
             ai_advice = hf._engineering_advice(opt_params, opt_preds_raw)
 
         return OptimizationResult(
@@ -116,6 +106,7 @@ def optimize(inp: MachiningInput):
             model_used=inp.model_id,
             ai_advice=ai_advice,
             optimization_method=opt_method,
+            applied_constraints=applied_constraints,
         )
 
     except ValueError as e:
